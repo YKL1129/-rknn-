@@ -1,0 +1,21 @@
+{
+  "confidence_threshold": 0.8,
+  "margin_threshold": 0.15,
+  "confirm_frames": 4,
+  "cooldown_seconds": 0.7,
+  "sentence_idle_seconds": 1.2,
+  "mediapipe_model_complexity": 0,
+  "camera_width": 640,
+  "camera_height": 480,
+  "process_width": 320,
+  "process_height": 240,
+  "draw_landmarks": true,
+  "draw_full_landmarks": false,
+  "prediction_smoothing": 5,
+  "sequence_length": 30,
+  "input_size": 204,
+  "record_split": "train",
+  "master_root": "Gesture_Master",
+  "dataset_output_root": "MP_Data_Build",
+  "feature_spec": "fusion_v1_204"
+}

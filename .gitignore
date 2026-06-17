@@ -1,0 +1,15 @@
+.idea/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.DS_Store
+
+# Large generated or training assets
+CNN_Gesture-master/MP_Data_Fusion/
+*.npy
+*.h5
+*.onnx
+
+# Local runtime artifacts
+runtime_config.local.json
