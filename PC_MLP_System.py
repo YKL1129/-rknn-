@@ -44,12 +44,13 @@ from gesture_runtime import (
     next_sequence_index,
     stratified_split,
     top1_with_margin,
+    normalized_entropy,
     write_json,
 )
 
 # 填入你的百炼 API Key7
 #sk-b3d3f5bc13744420b02d28cff3507fba
-dashscope.api_key = "sk-b3d3f5bc13744420b02d28cff3507fba"
+dashscope.api_key = ""
 
 # ================= 🔧 全局配置 =================
 DATA_PATH = os.path.join('CNN_Gesture-master/MP_Data_Fusion')
@@ -259,7 +260,9 @@ class VisionProcess(Process):
 
         mp_hands = mp.solutions.hands
         mp_drawing = mp.solutions.drawing_utils
-        hands = mp_hands.Hands(model_complexity=int(RUNTIME_CONFIG["mediapipe_model_complexity"]), min_detection_confidence=0.3, min_tracking_confidence=0.3)
+        #手部检测和追踪的置信度均默认设为了0.5
+
+        hands = mp_hands.Hands(model_complexity=int(RUNTIME_CONFIG["mediapipe_model_complexity"]), min_detection_confidence=0.5, min_tracking_confidence=0.5)
 
         model, actions = None, []
         if os.path.exists(MODEL_PATH_ONNX):
@@ -289,7 +292,7 @@ class VisionProcess(Process):
                 if cmd[0] == "STOP":
                     running = False
                 elif cmd[0] == "PREDICT":
-                    mode = "PREDICT";
+                    mode = "PREDICT"
                     pred_history.clear()
                     if os.path.exists(MODEL_PATH_ONNX):
                         model = ort.InferenceSession(MODEL_PATH_ONNX)
@@ -373,11 +376,16 @@ class VisionProcess(Process):
                         pred_history.append(outputs[0][0])
                         smooth_res = np.mean(pred_history, axis=0)
                         curr_idx, top_prob, margin = top1_with_margin(smooth_res)
-                        if top_prob > self.shared_ai_thresh.value and margin >= float(RUNTIME_CONFIG["margin_threshold"]):
+                        entropy = normalized_entropy(smooth_res)
+                        if (
+                            top_prob > self.shared_ai_thresh.value
+                            and margin >= float(RUNTIME_CONFIG["margin_threshold"])
+                            and entropy <= float(RUNTIME_CONFIG.get("entropy_threshold", 0.72))
+                        ):
                             action_res = str(actions[curr_idx]) if len(actions) > curr_idx else "UNKNOWN"
                             prob_res = float(top_prob)
                 else:
-                    sequence = [];
+                    sequence = []
                     pred_history.clear()
 
             if not self.out_queue.full():
@@ -418,7 +426,7 @@ class UIBridge(QThread):
                 pass
 
     def stop(self):
-        self.running = False;
+        self.running = False
         self.wait()
 
 
@@ -430,7 +438,7 @@ class VoiceWorker(QThread):
 
     def speak(self, text):
         if not self.is_muted:
-            self.text = text;
+            self.text = text
             self.start()
 
     def run(self):
@@ -605,7 +613,7 @@ class FusionWindow(QMainWindow):
         self.cmd_queue = Queue()
         self.out_queue = Queue(maxsize=2)
         self.shared_emg = Array('d', EMG_SIZE)
-        self.shared_ai_thresh = Value('f', 0.80)
+        self.shared_ai_thresh = Value('f', float(RUNTIME_CONFIG["confidence_threshold"]))
         self.shared_hand_thresh = Value('f', 0.50)
 
         self.emg_worker = EMGWorker(self.shared_emg)
@@ -760,7 +768,7 @@ class FusionWindow(QMainWindow):
         rl.addWidget(QLabel("◆ AI 动作识别阈值"))
         self.spin_threshold = QDoubleSpinBox()
         self.spin_threshold.setRange(0.00, 1.00)
-        self.spin_threshold.setValue(0.80)
+        self.spin_threshold.setValue(float(RUNTIME_CONFIG["confidence_threshold"]))
         self.spin_threshold.setSingleStep(0.05)
         self.spin_threshold.valueChanged.connect(lambda v: setattr(self.shared_ai_thresh, 'value', v))
         rl.addWidget(self.spin_threshold)
@@ -781,8 +789,8 @@ class FusionWindow(QMainWindow):
         layout.addWidget(right)
 
     def create_btn(self, t, f):
-        b = QPushButton(t);
-        b.clicked.connect(f);
+        b = QPushButton(t)
+        b.clicked.connect(f)
         return b
 
     def setup_shortcuts(self):
@@ -881,10 +889,15 @@ class FusionWindow(QMainWindow):
         if act == "--" or "UNKNOWN" in act or act == "IDLE":
             self.lbl_res.setText("--")
             self.action_state.update(None, now)
-            if len(self.word_buffer) > 0 and (now - self.last_valid_time > float(RUNTIME_CONFIG["sentence_idle_seconds"])):
-                self.log(f"Sentence rebuild: {self.word_buffer}")
-                self.llm_worker.translate(self.word_buffer.copy())
-                self.word_buffer.clear()
+            if len(self.word_buffer) > 0:
+                min_words = int(RUNTIME_CONFIG.get("sentence_min_words", 2))
+                idle_seconds = float(RUNTIME_CONFIG["sentence_idle_seconds"])
+                if len(self.word_buffer) < min_words:
+                    idle_seconds = float(RUNTIME_CONFIG.get("single_word_idle_seconds", idle_seconds))
+                if now - self.last_valid_time > idle_seconds:
+                    self.log(f"Sentence rebuild: {self.word_buffer}")
+                    self.llm_worker.translate(self.word_buffer.copy())
+                    self.word_buffer.clear()
             return
 
         self.lbl_res.setText(act)
@@ -911,19 +924,19 @@ class FusionWindow(QMainWindow):
     def go_to_record(self):
         self.cmd_queue.put(["RECORD"])
         self.ui_lbl_mode.setText("MODE : RECORD DATA")
-        self.box_rec.show();
+        self.box_rec.show()
         self.box_train.hide()
 
     def go_to_train(self):
         self.cmd_queue.put(["IDLE"])
         self.ui_lbl_mode.setText("MODE : NEURAL TRAIN")
-        self.box_rec.hide();
+        self.box_rec.hide()
         self.box_train.show()
 
     def go_to_predict(self):
         self.cmd_queue.put(["PREDICT"])
         self.ui_lbl_mode.setText("MODE : PREDICT (ONNX)")
-        self.box_rec.hide();
+        self.box_rec.hide()
         self.box_train.hide()
 
     def log(self, t):

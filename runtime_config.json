@@ -1,9 +1,12 @@
 {
   "confidence_threshold": 0.8,
   "margin_threshold": 0.15,
+  "entropy_threshold": 0.72,
   "confirm_frames": 4,
   "cooldown_seconds": 0.7,
   "sentence_idle_seconds": 1.2,
+  "single_word_idle_seconds": 2.8,
+  "sentence_min_words": 2,
   "mediapipe_model_complexity": 0,
   "camera_width": 640,
   "camera_height": 480,

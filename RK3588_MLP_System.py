@@ -25,7 +25,17 @@ from PyQt5.QtGui import QImage, QPixmap, QKeySequence, QColor
 # 🌟 唯一指定 NPU 引擎，彻底告别 TensorFlow 和 ONNX
 from rknnlite.api import RKNNLite
 
-from gesture_runtime import ActionStateMachine, PhraseTranslator, SIMPLE_HAND_CONNECTIONS, dataset_split_dir, list_action_names, load_runtime_config, next_sequence_index, top1_with_margin
+from gesture_runtime import (
+    ActionStateMachine,
+    PhraseTranslator,
+    SIMPLE_HAND_CONNECTIONS,
+    dataset_split_dir,
+    list_action_names,
+    load_runtime_config,
+    next_sequence_index,
+    top1_with_margin,
+    normalized_entropy,
+)
 
 # ================= 🔧 全局动态路径配置 =================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -348,7 +358,12 @@ class VisionProcess(Process):
                         pred_history.append(outputs[0][0])
                         smooth_res = np.mean(pred_history, axis=0)
                         curr_idx, top_prob, margin = top1_with_margin(smooth_res)
-                        if top_prob > self.shared_ai_thresh.value and margin >= float(RUNTIME_CONFIG["margin_threshold"]):
+                        entropy = normalized_entropy(smooth_res)
+                        if (
+                            top_prob > self.shared_ai_thresh.value
+                            and margin >= float(RUNTIME_CONFIG["margin_threshold"])
+                            and entropy <= float(RUNTIME_CONFIG.get("entropy_threshold", 0.72))
+                        ):
                             action_res = str(actions[curr_idx]) if len(actions) > curr_idx else "UNKNOWN"
                             prob_res = float(top_prob)
                 else:
@@ -660,10 +675,15 @@ class FusionWindow(QMainWindow):
         if act == "--" or "UNKNOWN" in act or act == "IDLE":
             self.lbl_res.setText("--")
             self.action_state.update(None, now)
-            if len(self.word_buffer) > 0 and (now - self.last_valid_time > float(RUNTIME_CONFIG["sentence_idle_seconds"])):
-                self.log(f"Sentence rebuild: {self.word_buffer}")
-                self.llm_worker.translate(self.word_buffer.copy())
-                self.word_buffer.clear()
+            if len(self.word_buffer) > 0:
+                min_words = int(RUNTIME_CONFIG.get("sentence_min_words", 2))
+                idle_seconds = float(RUNTIME_CONFIG["sentence_idle_seconds"])
+                if len(self.word_buffer) < min_words:
+                    idle_seconds = float(RUNTIME_CONFIG.get("single_word_idle_seconds", idle_seconds))
+                if now - self.last_valid_time > idle_seconds:
+                    self.log(f"Sentence rebuild: {self.word_buffer}")
+                    self.llm_worker.translate(self.word_buffer.copy())
+                    self.word_buffer.clear()
             return
 
         self.lbl_res.setText(act)

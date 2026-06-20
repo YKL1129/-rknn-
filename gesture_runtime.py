@@ -9,9 +9,12 @@ import numpy as np
 DEFAULT_RUNTIME_CONFIG = {
     "confidence_threshold": 0.80,
     "margin_threshold": 0.15,
+    "entropy_threshold": 1.55,
     "confirm_frames": 4,
     "cooldown_seconds": 0.70,
     "sentence_idle_seconds": 1.20,
+    "single_word_idle_seconds": 2.80,
+    "sentence_min_words": 2,
     "mediapipe_model_complexity": 0,
     "camera_width": 640,
     "camera_height": 480,
@@ -150,6 +153,16 @@ def top1_with_margin(probs):
     best_prob = float(probs[best])
     second_prob = float(probs[order[-2]]) if probs.size > 1 else 0.0
     return best, best_prob, best_prob - second_prob
+
+
+def normalized_entropy(probs):
+    probs = np.asarray(probs, dtype=np.float32).reshape(-1)
+    if probs.size <= 1:
+        return 0.0
+    probs = np.clip(probs, 1e-8, 1.0)
+    probs = probs / np.sum(probs)
+    entropy = -np.sum(probs * np.log(probs))
+    return float(entropy / np.log(float(probs.size)))
 
 
 SIMPLE_HAND_CONNECTIONS = [
