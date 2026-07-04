@@ -628,6 +628,8 @@ class FusionWindow(QMainWindow):
         )
 
         self.word_buffer = []
+        self.pending_sentence_words = None
+        self.pending_sentence_deadline = 0.0
         self.action_state = ActionStateMachine(RUNTIME_CONFIG["confirm_frames"], RUNTIME_CONFIG["cooldown_seconds"])
         self.last_action, self.locked_action = "", ""
         self.last_valid_time, self.last_speak_time, self.action_confirm_count = time.time(), 0, 0
@@ -771,7 +773,17 @@ class FusionWindow(QMainWindow):
         self.spin_threshold.setValue(float(RUNTIME_CONFIG["confidence_threshold"]))
         self.spin_threshold.setSingleStep(0.05)
         self.spin_threshold.valueChanged.connect(lambda v: setattr(self.shared_ai_thresh, 'value', v))
-        rl.addWidget(self.spin_threshold)
+        threshold_row = QHBoxLayout()
+        self.btn_threshold_down = QPushButton('-')
+        self.btn_threshold_down.setFixedWidth(48)
+        self.btn_threshold_down.clicked.connect(lambda: self.adjust_threshold(-0.05))
+        self.btn_threshold_up = QPushButton('+')
+        self.btn_threshold_up.setFixedWidth(48)
+        self.btn_threshold_up.clicked.connect(lambda: self.adjust_threshold(0.05))
+        threshold_row.addWidget(self.btn_threshold_down)
+        threshold_row.addWidget(self.spin_threshold, 1)
+        threshold_row.addWidget(self.btn_threshold_up)
+        rl.addLayout(threshold_row)
 
         rl.addWidget(QLabel("◆ 肌电监控 (已从 AI 输入剥离)"))
         self.plot_widget = pg.PlotWidget()
@@ -792,6 +804,10 @@ class FusionWindow(QMainWindow):
         b = QPushButton(t)
         b.clicked.connect(f)
         return b
+
+    def adjust_threshold(self, delta):
+        value = max(0.0, min(1.0, float(self.spin_threshold.value()) + float(delta)))
+        self.spin_threshold.setValue(round(value, 2))
 
     def setup_shortcuts(self):
         self.shortcut_rec = QShortcut(QKeySequence("L"), self)
@@ -886,6 +902,12 @@ class FusionWindow(QMainWindow):
             return
 
         now = time.time()
+        if self.pending_sentence_words and now >= self.pending_sentence_deadline:
+            self.log(f"Sentence rebuild: {self.pending_sentence_words}")
+            self.llm_worker.translate(self.pending_sentence_words.copy())
+            self.pending_sentence_words = None
+            self.pending_sentence_deadline = 0.0
+
         if act == "--" or "UNKNOWN" in act or act == "IDLE":
             self.lbl_res.setText("--")
             self.action_state.update(None, now)
@@ -894,19 +916,27 @@ class FusionWindow(QMainWindow):
                 idle_seconds = float(RUNTIME_CONFIG["sentence_idle_seconds"])
                 if len(self.word_buffer) < min_words:
                     idle_seconds = float(RUNTIME_CONFIG.get("single_word_idle_seconds", idle_seconds))
-                if now - self.last_valid_time > idle_seconds:
-                    self.log(f"Sentence rebuild: {self.word_buffer}")
-                    self.llm_worker.translate(self.word_buffer.copy())
+                if now - self.last_valid_time > idle_seconds and self.pending_sentence_words is None:
+                    #语气停顿时间
+                    merge_window = float(RUNTIME_CONFIG.get("sentence_merge_window_seconds", 1.0))
+                    self.pending_sentence_words = self.word_buffer.copy()
+                    self.pending_sentence_deadline = now + merge_window
+                    self.log(f"Sentence pending: {self.pending_sentence_words}")
                     self.word_buffer.clear()
             return
 
         self.lbl_res.setText(act)
         self.lbl_conf.setText(f"CONFIDENCE: {prob * 100:.1f}%")
         confirmed = self.action_state.update(act, now)
-        if confirmed and (not self.word_buffer or self.word_buffer[-1] != confirmed):
-            self.word_buffer.append(confirmed)
-            self.last_valid_time = now
-            self.log(f"Word accepted: [{confirmed}]")
+        if confirmed:
+            if self.pending_sentence_words:
+                self.word_buffer = self.pending_sentence_words + self.word_buffer
+                self.pending_sentence_words = None
+                self.pending_sentence_deadline = 0.0
+            if not self.word_buffer or self.word_buffer[-1] != confirmed:
+                self.word_buffer.append(confirmed)
+                self.last_valid_time = now
+                self.log(f"Word accepted: [{confirmed}]")
 
     def on_llm_result(self, sentence):
         self.log(f"🔊 AI 造句输出: {sentence}")

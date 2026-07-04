@@ -12,6 +12,7 @@ import struct
 import collections
 import queue
 import subprocess
+import shutil
 import threading
 from multiprocessing import Process, Queue, Value, Array
 
@@ -405,15 +406,41 @@ class VoiceWorker(QThread):
         self.cache_dir = os.path.join(BASE_DIR, "voice_cache")
         if not os.path.exists(self.cache_dir): os.makedirs(self.cache_dir)
     def speak(self, text):
-        if not self.is_muted: self.text = text; self.start()
+        if not self.is_muted:
+            self.text = str(text).strip()
+            if self.text and not self.isRunning():
+                self.start()
+    def _run_cmd(self, cmd):
+        try:
+            result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return result.returncode == 0
+        except Exception:
+            return False
     def run(self):
+        if not self.text:
+            return
         try:
             audio_file = os.path.join(self.cache_dir, f"{self.text}.mp3")
-            if not os.path.exists(audio_file):
-                subprocess.run(['edge-tts', '--voice', 'zh-CN-XiaoxiaoNeural', '--text', self.text, '--write-media', audio_file], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            if os.path.exists(audio_file):
-                subprocess.run(['mpg123', '-q', audio_file], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except: pass
+            edge_tts = shutil.which('edge-tts')
+            mpg123 = shutil.which('mpg123')
+            if edge_tts and mpg123:
+                if (not os.path.exists(audio_file)) and self._run_cmd([edge_tts, '--voice', 'zh-CN-XiaoxiaoNeural', '--text', self.text, '--write-media', audio_file]):
+                    pass
+                if os.path.exists(audio_file) and self._run_cmd([mpg123, '-q', audio_file]):
+                    return
+            for speaker in ('espeak-ng', 'espeak', 'spd-say'):
+                exe = shutil.which(speaker)
+                if not exe:
+                    continue
+                if speaker == 'spd-say':
+                    if self._run_cmd([exe, self.text]):
+                        return
+                else:
+                    if self._run_cmd([exe, '-v', 'zh', self.text]):
+                        return
+            print(f'[VoiceWorker] no available TTS backend for: {self.text}')
+        except Exception as exc:
+            print(f'[VoiceWorker] play failed: {exc}')
 
 
 class LocalLLMWorker(QThread):
@@ -535,7 +562,7 @@ class FusionWindow(QMainWindow):
 
         self.wave_buffer = collections.deque([2048] * 500, maxlen=500)
         self.cmd_queue = Queue(); self.out_queue = Queue(maxsize=2)
-        self.shared_emg = Array('d', EMG_SIZE); self.shared_ai_thresh = Value('f', 0.80); self.shared_hand_thresh = Value('f', 0.50)
+        self.shared_emg = Array('d', EMG_SIZE); self.shared_ai_thresh = Value('f', float(RUNTIME_CONFIG["confidence_threshold"])); self.shared_hand_thresh = Value('f', 0.50)
 
         self.sys_monitor = SysMonitorWorker()
         self.emg_worker = EMGWorker(self.shared_emg)
@@ -546,6 +573,8 @@ class FusionWindow(QMainWindow):
         self.vision_process = VisionProcess(self.cmd_queue, self.out_queue, self.shared_ai_thresh, self.shared_hand_thresh)
 
         self.word_buffer = []
+        self.pending_sentence_words = None
+        self.pending_sentence_deadline = 0.0
         self.record_split = str(RUNTIME_CONFIG.get("record_split", "train")).lower()
         self.action_state = ActionStateMachine(RUNTIME_CONFIG["confirm_frames"], RUNTIME_CONFIG["cooldown_seconds"])
         self.last_action, self.locked_action, self.last_valid_time, self.action_confirm_count = "", "", time.time(), 0
@@ -576,7 +605,9 @@ class FusionWindow(QMainWindow):
         self.txt_act = QLineEdit(); self.txt_act.setPlaceholderText(">> 输入动作标签...")
         self.btn_start = QPushButton("开始录制 (按L键)"); self.btn_start.setStyleSheet("background-color: #FF3366; color: white; border: none;"); self.btn_start.clicked.connect(self.trigger_record)
         self.prog_rec = QProgressBar(); self.prog_rec.setRange(0, SEQUENCE_LENGTH)
-        bl.addWidget(QLabel("数据采集配置:")); bl.addWidget(self.txt_act); bl.addWidget(self.btn_start); bl.addWidget(self.prog_rec)
+        self.btn_split = QPushButton()
+        self.btn_split.clicked.connect(self.toggle_record_split)
+        bl.addWidget(QLabel("??????:")); bl.addWidget(self.txt_act); bl.addWidget(self.btn_split); bl.addWidget(self.btn_start); bl.addWidget(self.prog_rec)
         nav_l.addWidget(self.box_rec); self.box_rec.hide(); nav_l.addStretch(); layout.addWidget(nav)
 
         cam = QFrame(); cam.setObjectName("CameraFrame"); cl = QVBoxLayout(cam); cl.setContentsMargins(0, 0, 0, 0)
@@ -600,8 +631,19 @@ class FusionWindow(QMainWindow):
         rl.addWidget(dash); rl.addSpacing(15)
 
         rl.addWidget(QLabel("◆ AI 动作识别阈值"))
-        self.spin_threshold = QDoubleSpinBox(); self.spin_threshold.setRange(0.00, 1.00); self.spin_threshold.setValue(0.80); self.spin_threshold.setSingleStep(0.05)
-        self.spin_threshold.valueChanged.connect(lambda v: setattr(self.shared_ai_thresh, 'value', v)); rl.addWidget(self.spin_threshold)
+        self.spin_threshold = QDoubleSpinBox(); self.spin_threshold.setRange(0.00, 1.00); self.spin_threshold.setValue(float(RUNTIME_CONFIG["confidence_threshold"])); self.spin_threshold.setSingleStep(0.05)
+        self.spin_threshold.valueChanged.connect(lambda v: setattr(self.shared_ai_thresh, 'value', v))
+        threshold_row = QHBoxLayout()
+        self.btn_threshold_down = QPushButton('-')
+        self.btn_threshold_down.setFixedWidth(48)
+        self.btn_threshold_down.clicked.connect(lambda: self.adjust_threshold(-0.05))
+        self.btn_threshold_up = QPushButton('+')
+        self.btn_threshold_up.setFixedWidth(48)
+        self.btn_threshold_up.clicked.connect(lambda: self.adjust_threshold(0.05))
+        threshold_row.addWidget(self.btn_threshold_down)
+        threshold_row.addWidget(self.spin_threshold, 1)
+        threshold_row.addWidget(self.btn_threshold_up)
+        rl.addLayout(threshold_row)
 
         rl.addWidget(QLabel("◆ 肌电波形监控"))
         self.plot_widget = pg.PlotWidget(); self.plot_widget.setBackground('#000000'); self.plot_widget.setYRange(0, 4096); self.plot_widget.setFixedHeight(140)
@@ -610,6 +652,10 @@ class FusionWindow(QMainWindow):
         rl.addWidget(QLabel("◆ 系统运行日志"))
         self.txt_log = QTextEdit(); self.txt_log.setReadOnly(True); self.txt_log.setFixedHeight(110); rl.addWidget(self.txt_log)
         layout.addWidget(right)
+
+    def adjust_threshold(self, delta):
+        value = max(0.0, min(1.0, float(self.spin_threshold.value()) + float(delta)))
+        self.spin_threshold.setValue(round(value, 2))
 
     def create_btn(self, t, f): b = QPushButton(t); b.clicked.connect(f); return b
     def setup_shortcuts(self): self.shortcut_rec = QShortcut(QKeySequence("L"), self); self.shortcut_rec.activated.connect(self.trigger_record_hotkey)
@@ -672,6 +718,12 @@ class FusionWindow(QMainWindow):
             return
 
         now = time.time()
+        if self.pending_sentence_words and now >= self.pending_sentence_deadline:
+            self.log(f"Sentence rebuild: {self.pending_sentence_words}")
+            self.llm_worker.translate(self.pending_sentence_words.copy())
+            self.pending_sentence_words = None
+            self.pending_sentence_deadline = 0.0
+
         if act == "--" or "UNKNOWN" in act or act == "IDLE":
             self.lbl_res.setText("--")
             self.action_state.update(None, now)
@@ -680,19 +732,26 @@ class FusionWindow(QMainWindow):
                 idle_seconds = float(RUNTIME_CONFIG["sentence_idle_seconds"])
                 if len(self.word_buffer) < min_words:
                     idle_seconds = float(RUNTIME_CONFIG.get("single_word_idle_seconds", idle_seconds))
-                if now - self.last_valid_time > idle_seconds:
-                    self.log(f"Sentence rebuild: {self.word_buffer}")
-                    self.llm_worker.translate(self.word_buffer.copy())
+                if now - self.last_valid_time > idle_seconds and self.pending_sentence_words is None:
+                    merge_window = float(RUNTIME_CONFIG.get("sentence_merge_window_seconds", 1.0))
+                    self.pending_sentence_words = self.word_buffer.copy()
+                    self.pending_sentence_deadline = now + merge_window
+                    self.log(f"Sentence pending: {self.pending_sentence_words}")
                     self.word_buffer.clear()
             return
 
         self.lbl_res.setText(act)
         self.lbl_conf.setText(f"CONFIDENCE: {prob * 100:.1f}%")
         confirmed = self.action_state.update(act, now)
-        if confirmed and (not self.word_buffer or self.word_buffer[-1] != confirmed):
-            self.word_buffer.append(confirmed)
-            self.last_valid_time = now
-            self.log(f"Word accepted: [{confirmed}]")
+        if confirmed:
+            if self.pending_sentence_words:
+                self.word_buffer = self.pending_sentence_words + self.word_buffer
+                self.pending_sentence_words = None
+                self.pending_sentence_deadline = 0.0
+            if not self.word_buffer or self.word_buffer[-1] != confirmed:
+                self.word_buffer.append(confirmed)
+                self.last_valid_time = now
+                self.log(f"Word accepted: [{confirmed}]")
 
     def on_llm_result(self, sentence): self.log(f"🔊 AI 翻译: {sentence}"); self.voice_worker.speak(sentence)
 
