@@ -7,6 +7,7 @@ import numpy as np
 import time
 import mediapipe as mp
 import serial
+import serial.tools.list_ports
 import pyqtgraph as pg
 import struct
 import collections
@@ -14,6 +15,7 @@ import queue
 import subprocess
 import shutil
 import threading
+import re
 from multiprocessing import Process, Queue, Value, Array
 
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -183,12 +185,33 @@ class EMGWorker(QThread):
         self.buffer = bytearray()
         self.moving_baseline, self.ema_envelope = np.zeros(EMG_SIZE), np.zeros(EMG_SIZE)
         self.shared_emg = shared_emg_array
+        self.serial_port = str(RUNTIME_CONFIG.get("serial_port", "")).strip()
 
     def auto_connect(self):
+        candidates = []
+        if self.serial_port:
+            candidates.append(self.serial_port)
         try:
-            self.ser = serial.Serial('COM15', SERIAL_BAUDRATE, timeout=0.01)
-            self.simulation_mode = False
-        except: self.simulation_mode = True
+            for port in serial.tools.list_ports.comports():
+                device = str(port.device).strip()
+                if not device or device in candidates:
+                    continue
+                if any(token in device for token in ('ttyUSB', 'ttyACM', 'ttyS', 'usbserial', 'COM')):
+                    candidates.append(device)
+        except Exception:
+            pass
+
+        for port_name in candidates:
+            try:
+                self.ser = serial.Serial(port_name, SERIAL_BAUDRATE, timeout=0.01)
+                self.simulation_mode = False
+                print(f"[EMGWorker] connected: {port_name}")
+                return
+            except Exception:
+                self.ser = None
+
+        self.simulation_mode = True
+        print('[EMGWorker] no serial device found, waveform input disabled')
 
     def run(self):
         self.auto_connect()
@@ -216,7 +239,7 @@ class EMGWorker(QThread):
                                     else:
                                         self.ema_envelope[i] = rectified_data[i] * 0.05 + self.ema_envelope[i] * 0.95
                                 for i in range(EMG_SIZE): self.shared_emg[i] = self.ema_envelope[i]
-                                self.data_signal.emit(self.ema_envelope, self.ema_envelope[0])
+                                self.data_signal.emit(self.ema_envelope, float(np.max(self.ema_envelope)))
                             except: pass
                     except: time.sleep(1); self.auto_connect()
     def stop(self):
@@ -405,9 +428,17 @@ class VoiceWorker(QThread):
         self.text = ""; self.is_muted = False
         self.cache_dir = os.path.join(BASE_DIR, "voice_cache")
         if not os.path.exists(self.cache_dir): os.makedirs(self.cache_dir)
+    def _normalize_text(self, text):
+        text = str(text).strip()
+        text = str(text).strip().rstrip("。！？.!?").strip()
+        return text
+    def _audio_file_path(self, text):
+        safe = self._normalize_text(text)
+        safe = safe.replace("/", "_").replace("\\", "_").replace("\n", " ").strip()
+        return os.path.join(self.cache_dir, f"{safe}.mp3")
     def speak(self, text):
         if not self.is_muted:
-            self.text = str(text).strip()
+            self.text = self._normalize_text(text)
             if self.text and not self.isRunning():
                 self.start()
     def _run_cmd(self, cmd):
@@ -420,14 +451,26 @@ class VoiceWorker(QThread):
         if not self.text:
             return
         try:
-            audio_file = os.path.join(self.cache_dir, f"{self.text}.mp3")
+            audio_file = self._audio_file_path(self.text)
             edge_tts = shutil.which('edge-tts')
-            mpg123 = shutil.which('mpg123')
-            if edge_tts and mpg123:
-                if (not os.path.exists(audio_file)) and self._run_cmd([edge_tts, '--voice', 'zh-CN-XiaoxiaoNeural', '--text', self.text, '--write-media', audio_file]):
-                    pass
-                if os.path.exists(audio_file) and self._run_cmd([mpg123, '-q', audio_file]):
+            if edge_tts and not os.path.exists(audio_file):
+                self._run_cmd([edge_tts, '--voice', 'zh-CN-XiaoxiaoNeural', '--text', self.text, '--write-media', audio_file])
+
+            for player in ('mpg123', 'ffplay', 'paplay', 'play', 'cvlc'):
+                exe = shutil.which(player)
+                if not exe or not os.path.exists(audio_file):
+                    continue
+                if player == 'mpg123' and self._run_cmd([exe, '-q', audio_file]):
                     return
+                if player == 'ffplay' and self._run_cmd([exe, '-nodisp', '-autoexit', '-loglevel', 'quiet', audio_file]):
+                    return
+                if player == 'paplay' and self._run_cmd([exe, audio_file]):
+                    return
+                if player == 'play' and self._run_cmd([exe, audio_file]):
+                    return
+                if player == 'cvlc' and self._run_cmd([exe, '--play-and-exit', '--intf', 'dummy', audio_file]):
+                    return
+
             for speaker in ('espeak-ng', 'espeak', 'spd-say'):
                 exe = shutil.which(speaker)
                 if not exe:
@@ -441,7 +484,6 @@ class VoiceWorker(QThread):
             print(f'[VoiceWorker] no available TTS backend for: {self.text}')
         except Exception as exc:
             print(f'[VoiceWorker] play failed: {exc}')
-
 
 class LocalLLMWorker(QThread):
     result_signal = pyqtSignal(str)
@@ -753,7 +795,13 @@ class FusionWindow(QMainWindow):
                 self.last_valid_time = now
                 self.log(f"Word accepted: [{confirmed}]")
 
-    def on_llm_result(self, sentence): self.log(f"🔊 AI 翻译: {sentence}"); self.voice_worker.speak(sentence)
+    def on_llm_result(self, sentence):
+        sentence = str(sentence).strip().rstrip("。！？.!?").strip()
+        if not sentence:
+            return
+        self.log(f"?? AI ??: {sentence}")
+        self.voice_worker.speak(sentence)
+
 
     def toggle_voice(self):
         self.voice_worker.is_muted = not self.voice_worker.is_muted

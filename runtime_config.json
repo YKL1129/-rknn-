@@ -21,5 +21,6 @@
   "record_split": "train",
   "master_root": "Gesture_Master",
   "dataset_output_root": "MP_Data_Build",
-  "feature_spec": "fusion_v1_204"
+  "feature_spec": "fusion_v1_204",
+  "serial_port": ""
 }

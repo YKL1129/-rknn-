@@ -15,6 +15,7 @@ DEFAULT_RUNTIME_CONFIG = {
     "sentence_idle_seconds": 1.20,
     "single_word_idle_seconds": 2.80,
     "sentence_min_words": 2,
+    "sentence_merge_window_seconds": 1.00,
     "mediapipe_model_complexity": 0,
     "camera_width": 640,
     "camera_height": 480,
@@ -29,6 +30,7 @@ DEFAULT_RUNTIME_CONFIG = {
     "master_root": "Gesture_Master",
     "dataset_output_root": "MP_Data_Build",
     "feature_spec": "fusion_v1_204",
+    "serial_port": "",
 }
 
 
