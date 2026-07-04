@@ -14,6 +14,7 @@ except ImportError:
     spidev = None
 import pyqtgraph as pg
 import struct
+import hashlib
 import collections
 import queue
 import subprocess
@@ -574,67 +575,113 @@ class UIBridge(QThread):
 
 
 class VoiceWorker(QThread):
+    log_signal = pyqtSignal(str)
+
     def __init__(self):
         super().__init__()
-        self.text = ""; self.is_muted = False
+        self.text = ""
+        self.is_muted = False
         self.cache_dir = os.path.join(BASE_DIR, "voice_cache")
-        if not os.path.exists(self.cache_dir): os.makedirs(self.cache_dir)
+        if not os.path.exists(self.cache_dir):
+            os.makedirs(self.cache_dir)
+
+    def _emit_log(self, message):
+        print(f"[VoiceWorker] {message}")
+        try:
+            self.log_signal.emit(message)
+        except Exception:
+            pass
+
     def _normalize_text(self, text):
         text = str(text).strip()
-        text = str(text).strip().rstrip("。！？.!?").strip()
+        text = re.sub(r"[\u3002\uff01\uff1f.!?]+$", "", str(text).strip()).strip()
         return text
-    def _audio_file_path(self, text):
-        safe = self._normalize_text(text)
-        safe = safe.replace("/", "_").replace("\\", "_").replace("\n", " ").strip()
-        return os.path.join(self.cache_dir, f"{safe}.mp3")
+
+    def _cache_base(self, text):
+        digest = hashlib.sha1(text.encode("utf-8")).hexdigest()
+        return os.path.join(self.cache_dir, digest)
+
+    def _play_audio_file(self, audio_file):
+        if not os.path.exists(audio_file):
+            return False
+        suffix = os.path.splitext(audio_file)[1].lower()
+        players = ['mpg123', 'ffplay', 'paplay', 'aplay', 'play', 'cvlc']
+        for player in players:
+            exe = shutil.which(player)
+            if not exe:
+                continue
+            if player == 'mpg123' and suffix != '.mp3':
+                continue
+            if player == 'aplay' and suffix not in ('.wav', '.au'):
+                continue
+            if player == 'mpg123' and self._run_cmd([exe, '-q', audio_file]):
+                self._emit_log(f'Audio played via {player}')
+                return True
+            if player == 'ffplay' and self._run_cmd([exe, '-nodisp', '-autoexit', '-loglevel', 'quiet', audio_file]):
+                self._emit_log(f'Audio played via {player}')
+                return True
+            if player == 'paplay' and self._run_cmd([exe, audio_file]):
+                self._emit_log(f'Audio played via {player}')
+                return True
+            if player == 'aplay' and self._run_cmd([exe, '-q', audio_file]):
+                self._emit_log(f'Audio played via {player}')
+                return True
+            if player == 'play' and self._run_cmd([exe, audio_file]):
+                self._emit_log(f'Audio played via {player}')
+                return True
+            if player == 'cvlc' and self._run_cmd([exe, '--play-and-exit', '--intf', 'dummy', audio_file]):
+                self._emit_log(f'Audio played via {player}')
+                return True
+        return False
+
     def speak(self, text):
         if not self.is_muted:
             self.text = self._normalize_text(text)
             if self.text and not self.isRunning():
                 self.start()
+
     def _run_cmd(self, cmd):
         try:
             result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             return result.returncode == 0
         except Exception:
             return False
+
     def run(self):
         if not self.text:
             return
         try:
-            audio_file = self._audio_file_path(self.text)
+            normalized = self._normalize_text(self.text)
+            cache_base = self._cache_base(normalized)
+            mp3_file = cache_base + '.mp3'
+            wav_file = cache_base + '.wav'
+
             edge_tts = shutil.which('edge-tts')
-            if edge_tts and not os.path.exists(audio_file):
-                self._run_cmd([edge_tts, '--voice', 'zh-CN-XiaoxiaoNeural', '--text', self.text, '--write-media', audio_file])
+            if edge_tts and not os.path.exists(mp3_file):
+                if self._run_cmd([edge_tts, '--voice', 'zh-CN-XiaoxiaoNeural', '--text', normalized, '--write-media', mp3_file]):
+                    self._emit_log('Generated speech cache with edge-tts')
 
-            for player in ('mpg123', 'ffplay', 'paplay', 'play', 'cvlc'):
-                exe = shutil.which(player)
-                if not exe or not os.path.exists(audio_file):
-                    continue
-                if player == 'mpg123' and self._run_cmd([exe, '-q', audio_file]):
-                    return
-                if player == 'ffplay' and self._run_cmd([exe, '-nodisp', '-autoexit', '-loglevel', 'quiet', audio_file]):
-                    return
-                if player == 'paplay' and self._run_cmd([exe, audio_file]):
-                    return
-                if player == 'play' and self._run_cmd([exe, audio_file]):
-                    return
-                if player == 'cvlc' and self._run_cmd([exe, '--play-and-exit', '--intf', 'dummy', audio_file]):
-                    return
+            if self._play_audio_file(mp3_file):
+                return
 
-            for speaker in ('espeak-ng', 'espeak', 'spd-say'):
+            for speaker in ('espeak-ng', 'espeak'):
                 exe = shutil.which(speaker)
                 if not exe:
                     continue
-                if speaker == 'spd-say':
-                    if self._run_cmd([exe, self.text]):
-                        return
-                else:
-                    if self._run_cmd([exe, '-v', 'zh', self.text]):
-                        return
-            print(f'[VoiceWorker] no available TTS backend for: {self.text}')
+                if (not os.path.exists(wav_file)) and self._run_cmd([exe, '-v', 'zh', '-w', wav_file, normalized]):
+                    self._emit_log(f'Generated speech cache with {speaker}')
+                if self._play_audio_file(wav_file):
+                    return
+
+            spd_say = shutil.which('spd-say')
+            if spd_say and self._run_cmd([spd_say, normalized]):
+                self._emit_log('Audio played via spd-say')
+                return
+
+            self._emit_log(f'No usable TTS output path for: {normalized}')
         except Exception as exc:
-            print(f'[VoiceWorker] play failed: {exc}')
+            self._emit_log(f'Audio playback failed: {exc}')
+
 
 class LocalLLMWorker(QThread):
     result_signal = pyqtSignal(str)
@@ -857,7 +904,7 @@ class FusionWindow(QMainWindow):
         self.ui_bridge.image_signal.connect(self.update_cam); self.ui_bridge.result_signal.connect(self.handle_res)
         self.ui_bridge.rec_progress_signal.connect(self.prog_rec.setValue); self.ui_bridge.fps_signal.connect(self.update_fps)
         self.ui_bridge.status_signal.connect(self.update_status); self.emg_worker.data_signal.connect(self.update_plot); self.emg_worker.log_signal.connect(self.log)
-        self.llm_worker.result_signal.connect(self.on_llm_result); self.llm_worker.log_signal.connect(self.log)
+        self.voice_worker.log_signal.connect(self.log); self.llm_worker.result_signal.connect(self.on_llm_result); self.llm_worker.log_signal.connect(self.log)
         self.sys_monitor.sys_signal.connect(self.update_sys_info)
 
     def update_cam(self, img): h, w, ch = img.shape; self.lbl_cam.setPixmap(QPixmap.fromImage(QImage(img.data, w, h, ch * w, QImage.Format_RGB888)))
