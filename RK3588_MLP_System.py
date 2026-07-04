@@ -626,7 +626,7 @@ class VoiceWorker(QThread):
             if player == 'mpg123' and self._run_cmd([exe, '-q', audio_file]):
                 self._emit_log(f'Audio played via {player}')
                 return True
-            if player == 'ffplay' and self._run_cmd([exe, '-nodisp', '-autoexit', '-loglevel', 'quiet', audio_file]):
+            if player == 'ffplay' and self._run_cmd([exe, '-nodisp', '-autoexit', '-nostdin', '-loglevel', 'quiet', audio_file]):
                 self._emit_log(f'Audio played via {player}')
                 return True
             if player == 'paplay' and self._run_cmd([exe, audio_file]):
@@ -651,7 +651,7 @@ class VoiceWorker(QThread):
 
     def _run_cmd(self, cmd):
         try:
-            result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            result = subprocess.run(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             return result.returncode == 0
         except Exception:
             return False
