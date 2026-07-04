@@ -582,6 +582,9 @@ class VoiceWorker(QThread):
         self.text = ""
         self.is_muted = False
         self.cache_dir = os.path.join(BASE_DIR, "voice_cache")
+        self.voice_backend_preference = str(RUNTIME_CONFIG.get("voice_backend_preference", "espeak")).strip().lower()
+        self.voice_player_preference = str(RUNTIME_CONFIG.get("voice_player_preference", "ffplay")).strip().lower()
+        self.edge_tts_voice = str(RUNTIME_CONFIG.get("voice_edge_tts_voice", "zh-CN-XiaoxiaoNeural")).strip()
         if not os.path.exists(self.cache_dir):
             os.makedirs(self.cache_dir)
 
@@ -601,18 +604,24 @@ class VoiceWorker(QThread):
         digest = hashlib.sha1(text.encode("utf-8")).hexdigest()
         return os.path.join(self.cache_dir, digest)
 
+    def _ordered_players(self, suffix):
+        if suffix == '.mp3':
+            players = ['ffplay', 'mpg123', 'paplay', 'play', 'cvlc']
+        else:
+            players = ['ffplay', 'aplay', 'paplay', 'play', 'cvlc']
+        preferred = self.voice_player_preference
+        if preferred in players:
+            players.remove(preferred)
+            players.insert(0, preferred)
+        return players
+
     def _play_audio_file(self, audio_file):
         if not os.path.exists(audio_file):
             return False
         suffix = os.path.splitext(audio_file)[1].lower()
-        players = ['mpg123', 'ffplay', 'paplay', 'aplay', 'play', 'cvlc']
-        for player in players:
+        for player in self._ordered_players(suffix):
             exe = shutil.which(player)
             if not exe:
-                continue
-            if player == 'mpg123' and suffix != '.mp3':
-                continue
-            if player == 'aplay' and suffix not in ('.wav', '.au'):
                 continue
             if player == 'mpg123' and self._run_cmd([exe, '-q', audio_file]):
                 self._emit_log(f'Audio played via {player}')
@@ -647,6 +656,25 @@ class VoiceWorker(QThread):
         except Exception:
             return False
 
+    def _generate_edge_tts_mp3(self, normalized, mp3_file):
+        edge_tts = shutil.which('edge-tts')
+        if not edge_tts:
+            return False
+        if (not os.path.exists(mp3_file)) and self._run_cmd([edge_tts, '--voice', self.edge_tts_voice, '--text', normalized, '--write-media', mp3_file]):
+            self._emit_log('Generated speech cache with edge-tts')
+        return os.path.exists(mp3_file)
+
+    def _generate_espeak_wav(self, normalized, wav_file):
+        for speaker in ('espeak-ng', 'espeak'):
+            exe = shutil.which(speaker)
+            if not exe:
+                continue
+            if (not os.path.exists(wav_file)) and self._run_cmd([exe, '-v', 'zh', '-w', wav_file, normalized]):
+                self._emit_log(f'Generated speech cache with {speaker}')
+            if os.path.exists(wav_file):
+                return True
+        return False
+
     def run(self):
         if not self.text:
             return
@@ -655,23 +683,15 @@ class VoiceWorker(QThread):
             cache_base = self._cache_base(normalized)
             mp3_file = cache_base + '.mp3'
             wav_file = cache_base + '.wav'
+            backend_order = ['espeak', 'edge-tts'] if self.voice_backend_preference != 'edge-tts' else ['edge-tts', 'espeak']
 
-            edge_tts = shutil.which('edge-tts')
-            if edge_tts and not os.path.exists(mp3_file):
-                if self._run_cmd([edge_tts, '--voice', 'zh-CN-XiaoxiaoNeural', '--text', normalized, '--write-media', mp3_file]):
-                    self._emit_log('Generated speech cache with edge-tts')
-
-            if self._play_audio_file(mp3_file):
-                return
-
-            for speaker in ('espeak-ng', 'espeak'):
-                exe = shutil.which(speaker)
-                if not exe:
-                    continue
-                if (not os.path.exists(wav_file)) and self._run_cmd([exe, '-v', 'zh', '-w', wav_file, normalized]):
-                    self._emit_log(f'Generated speech cache with {speaker}')
-                if self._play_audio_file(wav_file):
-                    return
+            for backend in backend_order:
+                if backend == 'espeak' and self._generate_espeak_wav(normalized, wav_file):
+                    if self._play_audio_file(wav_file):
+                        return
+                if backend == 'edge-tts' and self._generate_edge_tts_mp3(normalized, mp3_file):
+                    if self._play_audio_file(mp3_file):
+                        return
 
             spd_say = shutil.which('spd-say')
             if spd_say and self._run_cmd([spd_say, normalized]):

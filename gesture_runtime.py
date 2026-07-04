@@ -38,6 +38,9 @@ DEFAULT_RUNTIME_CONFIG = {
     "spi_bits_per_word": 8,
     "spi_packet_size": 34,
     "spi_poll_interval_ms": 5,
+    "voice_backend_preference": "espeak",
+    "voice_player_preference": "ffplay",
+    "voice_edge_tts_voice": "zh-CN-XiaoxiaoNeural",
 }
 
 
