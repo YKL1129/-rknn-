@@ -8,6 +8,10 @@ import time
 import mediapipe as mp
 import serial
 import serial.tools.list_ports
+try:
+    import spidev
+except ImportError:
+    spidev = None
 import pyqtgraph as pg
 import struct
 import collections
@@ -177,17 +181,94 @@ class SysMonitorWorker(QThread):
 
 class EMGWorker(QThread):
     data_signal = pyqtSignal(np.ndarray, float)
+    log_signal = pyqtSignal(str)
+
     def __init__(self, shared_emg_array):
         super().__init__()
-        self.running = True; self.ser = None
-        self.simulation_mode = False; self.is_init = False
-        self.HEADER, self.PACKET_SIZE = b'\x55\xAA', 34
+        self.running = True
+        self.ser = None
+        self.spi = None
+        self.transport = "none"
+        self.simulation_mode = False
+        self.is_init = False
+        self.HEADER = b'\x55\xAA'
+        self.PACKET_SIZE = int(RUNTIME_CONFIG.get("spi_packet_size", 34))
+        if self.PACKET_SIZE < (EMG_SIZE * 2 + 2):
+            self.PACKET_SIZE = EMG_SIZE * 2 + 2
         self.buffer = bytearray()
-        self.moving_baseline, self.ema_envelope = np.zeros(EMG_SIZE), np.zeros(EMG_SIZE)
+        self.moving_baseline = np.zeros(EMG_SIZE)
+        self.ema_envelope = np.zeros(EMG_SIZE)
         self.shared_emg = shared_emg_array
+        self.emg_transport = str(RUNTIME_CONFIG.get("emg_transport", "auto")).strip().lower()
         self.serial_port = str(RUNTIME_CONFIG.get("serial_port", "")).strip()
+        self.spi_device = str(RUNTIME_CONFIG.get("spi_device", "/dev/spidev4.0")).strip()
+        self.spi_mode = int(RUNTIME_CONFIG.get("spi_mode", 0))
+        self.spi_speed_hz = int(RUNTIME_CONFIG.get("spi_speed_hz", 1000000))
+        self.spi_bits_per_word = int(RUNTIME_CONFIG.get("spi_bits_per_word", 8))
+        self.spi_poll_interval = max(0.001, float(RUNTIME_CONFIG.get("spi_poll_interval_ms", 5)) / 1000.0)
+        self.spi_tx_template = [0] * self.PACKET_SIZE
 
-    def auto_connect(self):
+    def _emit_log(self, message):
+        print(f"[EMGWorker] {message}")
+        try:
+            self.log_signal.emit(message)
+        except Exception:
+            pass
+
+    def _parse_spi_device(self):
+        match = re.search(r"spidev(\d+)\.(\d+)", self.spi_device)
+        if not match:
+            raise ValueError(f"invalid SPI device path: {self.spi_device}")
+        return int(match.group(1)), int(match.group(2))
+
+    def _reset_transport(self):
+        if self.spi is not None:
+            try:
+                self.spi.close()
+            except Exception:
+                pass
+        self.spi = None
+        if self.ser is not None:
+            try:
+                self.ser.close()
+            except Exception:
+                pass
+        self.ser = None
+        self.transport = "none"
+        self.buffer = bytearray()
+        self.is_init = False
+        self.moving_baseline.fill(0.0)
+        self.ema_envelope.fill(0.0)
+
+    def _connect_spi(self):
+        if spidev is None:
+            self._emit_log("??? spidev????? SPI ??")
+            return False
+        if not self.spi_device:
+            self._emit_log("??? SPI ????")
+            return False
+        try:
+            bus, device = self._parse_spi_device()
+            spi = spidev.SpiDev()
+            spi.open(bus, device)
+            spi.max_speed_hz = self.spi_speed_hz
+            spi.mode = self.spi_mode
+            if hasattr(spi, "bits_per_word"):
+                try:
+                    spi.bits_per_word = self.spi_bits_per_word
+                except Exception:
+                    pass
+            self.spi = spi
+            self.transport = "spi"
+            self.simulation_mode = False
+            self._emit_log(f"??? SPI ????: {self.spi_device} mode={self.spi_mode} speed={self.spi_speed_hz}Hz")
+            return True
+        except Exception as exc:
+            self.spi = None
+            self._emit_log(f"SPI ????: {self.spi_device} ({exc})")
+            return False
+
+    def _connect_serial(self):
         candidates = []
         if self.serial_port:
             candidates.append(self.serial_port)
@@ -204,47 +285,117 @@ class EMGWorker(QThread):
         for port_name in candidates:
             try:
                 self.ser = serial.Serial(port_name, SERIAL_BAUDRATE, timeout=0.01)
+                self.transport = "serial"
                 self.simulation_mode = False
-                print(f"[EMGWorker] connected: {port_name}")
-                return
+                self._emit_log(f"?????????: {port_name}")
+                return True
             except Exception:
                 self.ser = None
+        return False
+
+    def auto_connect(self):
+        self._reset_transport()
+        if self.emg_transport == "spi":
+            order = ["spi"]
+        elif self.emg_transport == "serial":
+            order = ["serial"]
+        else:
+            order = ["spi", "serial"]
+
+        for transport in order:
+            if transport == "spi" and self._connect_spi():
+                return
+            if transport == "serial" and self._connect_serial():
+                return
 
         self.simulation_mode = True
-        print('[EMGWorker] no serial device found, waveform input disabled')
+        self._emit_log("?????????????????")
+
+    def _process_payload(self, payload):
+        if len(payload) < EMG_SIZE * 2:
+            return False
+        try:
+            raw_data = np.array(struct.unpack('<16H', payload[:EMG_SIZE * 2]), dtype=float)
+        except Exception:
+            return False
+
+        if not self.is_init:
+            self.moving_baseline = raw_data.copy()
+            self.is_init = True
+            return True
+
+        self.moving_baseline = self.moving_baseline * 0.98 + raw_data * 0.02
+        rectified_data = np.abs(raw_data - self.moving_baseline)
+        for i in range(EMG_SIZE):
+            if rectified_data[i] > self.ema_envelope[i]:
+                self.ema_envelope[i] = rectified_data[i] * 0.4 + self.ema_envelope[i] * 0.6
+            else:
+                self.ema_envelope[i] = rectified_data[i] * 0.05 + self.ema_envelope[i] * 0.95
+        for i in range(EMG_SIZE):
+            self.shared_emg[i] = self.ema_envelope[i]
+        self.data_signal.emit(self.ema_envelope.copy(), float(np.max(self.ema_envelope)))
+        return True
+
+    def _consume_chunk(self, chunk):
+        if not chunk:
+            return
+        if len(chunk) == EMG_SIZE * 2 and not chunk.startswith(self.HEADER):
+            self._process_payload(chunk)
+            return
+
+        self.buffer.extend(chunk)
+        while len(self.buffer) >= self.PACKET_SIZE:
+            idx = self.buffer.find(self.HEADER)
+            if idx == -1:
+                if len(self.buffer) == EMG_SIZE * 2:
+                    payload = bytes(self.buffer)
+                    self.buffer.clear()
+                    self._process_payload(payload)
+                    return
+                self.buffer = self.buffer[-2:]
+                return
+            if idx > 0:
+                self.buffer = self.buffer[idx:]
+                continue
+            if len(self.buffer) < self.PACKET_SIZE:
+                return
+            packet = bytes(self.buffer[:self.PACKET_SIZE])
+            self.buffer = self.buffer[self.PACKET_SIZE:]
+            self._process_payload(packet[2:2 + EMG_SIZE * 2])
+
+    def _read_spi_chunk(self):
+        if self.spi is None:
+            return b""
+        data = self.spi.xfer2(self.spi_tx_template)
+        if self.spi_poll_interval > 0:
+            time.sleep(self.spi_poll_interval)
+        return bytes(data)
 
     def run(self):
         self.auto_connect()
         while self.running:
-            if self.simulation_mode: time.sleep(0.02)
-            else:
-                if self.ser and self.ser.is_open:
-                    try:
-                        if self.ser.in_waiting: self.buffer.extend(self.ser.read(self.ser.in_waiting))
-                        while len(self.buffer) >= self.PACKET_SIZE:
-                            idx = self.buffer.find(self.HEADER)
-                            if idx == -1: self.buffer = self.buffer[-2:]; break
-                            if idx > 0: self.buffer = self.buffer[idx:]; continue
-                            if len(self.buffer) < self.PACKET_SIZE: break
-                            packet = self.buffer[:self.PACKET_SIZE]; self.buffer = self.buffer[self.PACKET_SIZE:]
-                            try:
-                                raw_data = np.array(struct.unpack('<16H', packet[2:]), dtype=float)
-                                if not self.is_init:
-                                    self.moving_baseline = raw_data.copy(); self.is_init = True; continue
-                                self.moving_baseline = self.moving_baseline * 0.98 + raw_data * 0.02
-                                rectified_data = np.abs(raw_data - self.moving_baseline)
-                                for i in range(EMG_SIZE):
-                                    if rectified_data[i] > self.ema_envelope[i]:
-                                        self.ema_envelope[i] = rectified_data[i] * 0.4 + self.ema_envelope[i] * 0.6
-                                    else:
-                                        self.ema_envelope[i] = rectified_data[i] * 0.05 + self.ema_envelope[i] * 0.95
-                                for i in range(EMG_SIZE): self.shared_emg[i] = self.ema_envelope[i]
-                                self.data_signal.emit(self.ema_envelope, float(np.max(self.ema_envelope)))
-                            except: pass
-                    except: time.sleep(1); self.auto_connect()
+            if self.simulation_mode:
+                time.sleep(0.02)
+                continue
+            try:
+                if self.transport == "spi":
+                    self._consume_chunk(self._read_spi_chunk())
+                    continue
+                if self.transport == "serial" and self.ser and self.ser.is_open:
+                    if self.ser.in_waiting:
+                        self._consume_chunk(self.ser.read(self.ser.in_waiting))
+                    else:
+                        time.sleep(0.005)
+                    continue
+                time.sleep(0.05)
+            except Exception as exc:
+                self._emit_log(f"{self.transport.upper()} ?????????: {exc}")
+                time.sleep(1.0)
+                self.auto_connect()
+
     def stop(self):
-        self.running = False;
-        if self.ser: self.ser.close()
+        self.running = False
+        self._reset_transport()
         self.wait()
 
 
@@ -705,7 +856,7 @@ class FusionWindow(QMainWindow):
     def connect_signals(self):
         self.ui_bridge.image_signal.connect(self.update_cam); self.ui_bridge.result_signal.connect(self.handle_res)
         self.ui_bridge.rec_progress_signal.connect(self.prog_rec.setValue); self.ui_bridge.fps_signal.connect(self.update_fps)
-        self.ui_bridge.status_signal.connect(self.update_status); self.emg_worker.data_signal.connect(self.update_plot)
+        self.ui_bridge.status_signal.connect(self.update_status); self.emg_worker.data_signal.connect(self.update_plot); self.emg_worker.log_signal.connect(self.log)
         self.llm_worker.result_signal.connect(self.on_llm_result); self.llm_worker.log_signal.connect(self.log)
         self.sys_monitor.sys_signal.connect(self.update_sys_info)
 

@@ -30,7 +30,14 @@ DEFAULT_RUNTIME_CONFIG = {
     "master_root": "Gesture_Master",
     "dataset_output_root": "MP_Data_Build",
     "feature_spec": "fusion_v1_204",
+    "emg_transport": "auto",
     "serial_port": "",
+    "spi_device": "/dev/spidev4.0",
+    "spi_mode": 0,
+    "spi_speed_hz": 1000000,
+    "spi_bits_per_word": 8,
+    "spi_packet_size": 34,
+    "spi_poll_interval_ms": 5,
 }
 
 
