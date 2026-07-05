@@ -582,7 +582,7 @@ class VoiceWorker(QThread):
         self.text = ""
         self.is_muted = False
         self.cache_dir = os.path.join(BASE_DIR, "voice_cache")
-        self.voice_backend_preference = str(RUNTIME_CONFIG.get("voice_backend_preference", "espeak")).strip().lower()
+        self.voice_backend_preference = str(RUNTIME_CONFIG.get("voice_backend_preference", "pyttsx3")).strip().lower()
         self.voice_player_preference = str(RUNTIME_CONFIG.get("voice_player_preference", "ffplay")).strip().lower()
         self.edge_tts_voice = str(RUNTIME_CONFIG.get("voice_edge_tts_voice", "zh-CN-XiaoxiaoNeural")).strip()
         if not os.path.exists(self.cache_dir):
@@ -656,6 +656,23 @@ class VoiceWorker(QThread):
         except Exception:
             return False
 
+    def _speak_with_pyttsx3(self, normalized):
+        try:
+            import pyttsx3
+            engine = pyttsx3.init()
+            engine.setProperty('rate', 150)
+            engine.say(normalized)
+            engine.runAndWait()
+            try:
+                engine.stop()
+            except Exception:
+                pass
+            self._emit_log('Audio played via pyttsx3')
+            return True
+        except Exception as exc:
+            self._emit_log(f'pyttsx3 failed: {exc}')
+            return False
+
     def _generate_edge_tts_mp3(self, normalized, mp3_file):
         edge_tts = shutil.which('edge-tts')
         if not edge_tts:
@@ -680,10 +697,19 @@ class VoiceWorker(QThread):
             return
         try:
             normalized = self._normalize_text(self.text)
+            if self.voice_backend_preference == 'pyttsx3' and self._speak_with_pyttsx3(normalized):
+                return
+
             cache_base = self._cache_base(normalized)
             mp3_file = cache_base + '.mp3'
             wav_file = cache_base + '.wav'
-            backend_order = ['espeak', 'edge-tts'] if self.voice_backend_preference != 'edge-tts' else ['edge-tts', 'espeak']
+
+            if self.voice_backend_preference == 'edge-tts':
+                backend_order = ['edge-tts', 'espeak']
+            elif self.voice_backend_preference == 'pyttsx3':
+                backend_order = ['espeak', 'edge-tts']
+            else:
+                backend_order = ['espeak', 'edge-tts']
 
             for backend in backend_order:
                 if backend == 'espeak' and self._generate_espeak_wav(normalized, wav_file):
@@ -692,6 +718,9 @@ class VoiceWorker(QThread):
                 if backend == 'edge-tts' and self._generate_edge_tts_mp3(normalized, mp3_file):
                     if self._play_audio_file(mp3_file):
                         return
+
+            if self._speak_with_pyttsx3(normalized):
+                return
 
             spd_say = shutil.which('spd-say')
             if spd_say and self._run_cmd([spd_say, normalized]):
