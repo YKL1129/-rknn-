@@ -867,6 +867,7 @@ class FusionWindow(QMainWindow):
         self.record_split = str(RUNTIME_CONFIG.get("record_split", "train")).lower()
         self.action_state = ActionStateMachine(RUNTIME_CONFIG["confirm_frames"], RUNTIME_CONFIG["cooldown_seconds"])
         self.last_action, self.locked_action, self.last_valid_time, self.action_confirm_count = "", "", time.time(), 0
+        self.last_speak_time = 0.0
 
         self.init_ui(); self.refresh_record_split_button(); self.connect_signals(); self.setup_shortcuts()
         self.emg_worker.start(); self.vision_process.start(); self.ui_bridge.start(); self.sys_monitor.start()
@@ -1041,6 +1042,11 @@ class FusionWindow(QMainWindow):
                 self.word_buffer.append(confirmed)
                 self.last_valid_time = now
                 self.log(f"Word accepted: [{confirmed}]")
+                voice_mode = str(RUNTIME_CONFIG.get("voice_output_mode", "recognized_word")).strip().lower()
+                voice_gap = float(RUNTIME_CONFIG.get("voice_cooldown_seconds", 1.5))
+                if voice_mode in ("recognized_word", "both") and (now - self.last_speak_time) > voice_gap:
+                    self.voice_worker.speak(confirmed)
+                    self.last_speak_time = now
 
     def on_llm_result(self, sentence):
         sentence = str(sentence).strip().rstrip("。！？.!?").strip()

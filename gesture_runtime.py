@@ -41,6 +41,8 @@ DEFAULT_RUNTIME_CONFIG = {
     "voice_backend_preference": "pyttsx3",
     "voice_player_preference": "ffplay",
     "voice_edge_tts_voice": "zh-CN-XiaoxiaoNeural",
+    "voice_output_mode": "recognized_word",
+    "voice_cooldown_seconds": 1.5,
 }
 
 
