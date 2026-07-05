@@ -154,25 +154,35 @@ class SysMonitorWorker(QThread):
     def __init__(self):
         super().__init__()
         self.running = True
+        self.npu_load_path = str(RUNTIME_CONFIG.get("npu_load_path", "/sys/kernel/debug/rknpu/load")).strip()
+
+    def _read_npu_load(self):
+        try:
+            with open(self.npu_load_path, 'r') as f:
+                for line in f.readlines():
+                    if "NPU load" in line:
+                        raw = line.split('NPU load:')[1].strip()
+                        if raw.endswith(','):
+                            raw = raw[:-1]
+                        return raw.replace('Core', 'C')
+            return "N/A"
+        except PermissionError:
+            return "N/A (No Permission)"
+        except FileNotFoundError:
+            return "N/A (Path Missing)"
+        except Exception:
+            return "N/A"
 
     def run(self):
         while self.running:
             temp_str, npu_str = "--", "--"
             try:
                 with open('/sys/class/thermal/thermal_zone0/temp', 'r') as f:
-                    temp_str = f"{float(f.read().strip()) / 1000.0:.1f} °C"
-            except: temp_str = "N/A"
+                    temp_str = f"{float(f.read().strip()) / 1000.0:.1f} ?C"
+            except:
+                temp_str = "N/A"
 
-            try:
-                with open('/sys/kernel/debug/rknpu/load', 'r') as f:
-                    for line in f.readlines():
-                        if "NPU load" in line:
-                            raw = line.split('NPU load:')[1].strip()
-                            if raw.endswith(','): raw = raw[:-1]
-                            npu_str = raw.replace('Core', 'C')
-                            break
-            except: npu_str = "N/A (Req Sudo)"
-
+            npu_str = self._read_npu_load()
             self.sys_signal.emit(temp_str, npu_str)
             time.sleep(1)
 

@@ -43,6 +43,7 @@ DEFAULT_RUNTIME_CONFIG = {
     "voice_edge_tts_voice": "zh-CN-XiaoxiaoNeural",
     "voice_output_mode": "recognized_word",
     "voice_cooldown_seconds": 1.5,
+    "npu_load_path": "/sys/kernel/debug/rknpu/load",
 }
 
 
