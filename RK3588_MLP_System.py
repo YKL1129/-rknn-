@@ -39,6 +39,7 @@ from gesture_runtime import (
     SIMPLE_HAND_CONNECTIONS,
     dataset_split_dir,
     list_action_names,
+    resolve_action_names,
     load_runtime_config,
     next_sequence_index,
     top1_with_margin,
@@ -52,6 +53,7 @@ RUNTIME_CONFIG = load_runtime_config(BASE_DIR)
 # 纯视觉特征数据集与模型路径
 DATA_PATH = os.path.join(BASE_DIR, 'MP_Data_Fusion')
 MODEL_PATH_RKNN = os.path.join(BASE_DIR, 'action_fusion.rknn')
+LABELS_PATH = os.path.join(BASE_DIR, str(RUNTIME_CONFIG.get("labels_file", "labels.txt")))
 
 # 本地断网 Qwen 大模型路径
 LLM_DEMO_PATH = '/home/elf/examples/rkllm_api_demo/deploy/build/build_linux_aarch64_Release/llm_demo'
@@ -437,7 +439,7 @@ class VisionProcess(Process):
                     model.init_runtime(core_mask=RKNNLite.NPU_CORE_AUTO)
                 if os.path.exists(DATA_PATH):
                     actions = np.array(
-                        list_action_names(DATA_PATH))
+                        resolve_action_names(DATA_PATH, LABELS_PATH))
             except:
                 pass
 
@@ -470,7 +472,7 @@ class VisionProcess(Process):
                         model.load_rknn(MODEL_PATH_RKNN)
                         model.init_runtime(core_mask=RKNNLite.NPU_CORE_AUTO)
                         actions = np.array(
-                            list_action_names(DATA_PATH))
+                            resolve_action_names(DATA_PATH, LABELS_PATH))
                 elif cmd[0] == "RECORD_TRIGGER":
                     mode = "RECORD"
                     record_split, record_action, record_seq_idx = cmd[1], cmd[2], cmd[3]

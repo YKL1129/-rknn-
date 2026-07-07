@@ -44,6 +44,7 @@ DEFAULT_RUNTIME_CONFIG = {
     "voice_output_mode": "recognized_word",
     "voice_cooldown_seconds": 1.5,
     "npu_load_path": "/sys/kernel/debug/rknpu/load",
+    "labels_file": "labels.txt",
 }
 
 
@@ -87,6 +88,38 @@ def list_action_names(data_path):
         f for f in os.listdir(action_root)
         if os.path.isdir(os.path.join(action_root, f)) and f not in reserved_dirs
     ]))
+
+def load_action_names_from_file(path):
+    if not path or not os.path.exists(path):
+        return np.array([])
+    names = []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                name = str(line).strip()
+                if name:
+                    names.append(name)
+    except Exception:
+        return np.array([])
+    return np.array(names, dtype=object)
+
+
+def save_action_names_to_file(path, actions):
+    actions = [str(a).strip() for a in actions if str(a).strip()]
+    ensure_dir(os.path.dirname(path) or ".")
+    with open(path, "w", encoding="utf-8") as f:
+        for action in actions:
+            f.write(action + "\n")
+
+
+def resolve_action_names(data_path, labels_path=""):
+    labels_path = str(labels_path or "").strip()
+    if labels_path:
+        actions = load_action_names_from_file(labels_path)
+        if actions.size > 0:
+            return actions
+    return list_action_names(data_path)
+
 
 
 def next_sequence_index(action_root):

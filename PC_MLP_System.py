@@ -38,6 +38,7 @@ from gesture_runtime import (
     class_count_report,
     dataset_split_dir,
     list_action_names,
+    save_action_names_to_file,
     load_runtime_config,
     load_sequence_dataset,
     master_split_dir,
@@ -539,6 +540,8 @@ class TrainWorker(QThread):
 
             self.log_signal.emit(f">>> Valid sequences: {len(X)} | classes: {len(actions)}")
             self.log_signal.emit(f">>> Per-class counts: {class_count_report(labels, actions)}")
+            save_action_names_to_file(LABELS_PATH, actions)
+            self.log_signal.emit(f">>> Saved label file: {LABELS_PATH}")
             if bad:
                 self.log_signal.emit(f">>> Skipped invalid sequences: {len(bad)}")
 
