@@ -57,9 +57,9 @@ dashscope.api_key = ""
 DATA_PATH = os.path.join('CNN_Gesture-master/MP_Data_Fusion')
 MODEL_PATH_H5 = 'CNN_Gesture-master/action_fusion.h5'
 MODEL_PATH_ONNX = 'CNN_Gesture-master/action_fusion.onnx'
-LABELS_PATH = 'CNN_Gesture-master/labels.txt'
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 RUNTIME_CONFIG = load_runtime_config(BASE_DIR)
+LABELS_PATH = os.path.join(BASE_DIR, str(RUNTIME_CONFIG.get("labels_file", "labels.txt")))
 MASTER_ROOT = os.path.join(BASE_DIR, RUNTIME_CONFIG["master_root"])
 BUILD_OUTPUT_ROOT = os.path.join(BASE_DIR, RUNTIME_CONFIG["dataset_output_root"])
 
