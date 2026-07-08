@@ -13,3 +13,10 @@ CNN_Gesture-master/MP_Data_Fusion/
 
 # Local runtime artifacts
 runtime_config.local.json
+phrase_cache.json
+logs/
+voice_cache/
+temp_voice.mp3
+boot_error_log.txt
+Gesture_Master/
+MP_Data_Build/

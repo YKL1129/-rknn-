@@ -1,0 +1,21 @@
+﻿[Unit]
+Description=Neurolink RK3588 Sign Translation Terminal
+After=network-online.target sound.target graphical.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=elf
+Group=elf
+WorkingDirectory=/home/elf/Neurolink_Project
+Environment=PYTHONUNBUFFERED=1
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+Environment=PULSE_RUNTIME_PATH=/run/user/1000/pulse
+Environment=PULSE_SERVER=unix:/run/user/1000/pulse/native
+ExecStart=/bin/bash /home/elf/Neurolink_Project/rk3588_start.sh
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+
